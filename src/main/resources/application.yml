@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: "1БКС24072"
+
+greeting:
+  text: "Hello world"
