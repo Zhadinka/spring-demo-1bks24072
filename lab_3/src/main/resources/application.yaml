@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: demo
+
+  config:
+    # Секреты лежат в файле .env (образец - .env.example).
+    # Формат строк: KEY=value. Значения доступны ниже как ${KEY}.
+    import: optional:file:.env[.properties]
+
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:lab_db}
+    username: ${DB_USER:lab_app}      # ограниченный пользователь БД (только DML), не владелец и не postgres
+    password: ${DB_PASSWORD}          # без значения по умолчанию: пароль берётся только из окружения/.env
+
+  jpa:
+    open-in-view: false               # сессия БД живёт только внутри сервисов
+    hibernate:
+      ddl-auto: validate              # схему создают SQL-скрипты из db/, приложение лишь проверяет соответствие
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC

@@ -1,0 +1,316 @@
+
+### Коллекция запросов: обработка лабораторных проб (IntelliJ IDEA HTTP Client)
+### Запускайте запросы сверху вниз. Идентификаторы сохраняются в переменные автоматически
+### ({{userId}}, {{sampleId}} ...), поэтому коллекция не зависит от тестовых данных в БД
+### и может выполняться повторно. Материал {{mat}} уникален для каждого прогона:
+### бизнес-операция "назначить методики" видит только методики этого сценария.
+
+
+
+### ЧАСТЬ A. CRUD: пользователи
+
+
+### A1. Создать пользователя (201). Заодно задаём уникальный материал сценария
+POST http://localhost:8080/api/users
+Content-Type: application/json
+
+{"name": "Maxim", "email": "maxim-{{$uuid}}@gmail.com"}
+
+> {%
+    client.global.set("userId", response.body.id);
+    client.global.set("mat", "blood-" + Date.now());
+%}
+
+### A2. Список пользователей (200)
+GET http://localhost:8080/api/users
+
+### A3. Пользователь по id (200)
+GET http://localhost:8080/api/users/{{userId}}
+
+### A4. Частичное обновление пользователя (200), email не меняется
+PATCH http://localhost:8080/api/users/{{userId}}
+Content-Type: application/json
+
+{"name": "Maxim Ivanov"}
+
+
+### ЧАСТЬ B. CRUD: методики, пробы
+
+
+### B1. Методика A: диапазон 0..100, допустимый разброс 4 (201)
+POST http://localhost:8080/api/analysis-methods
+Content-Type: application/json
+
+{"name": "Glucose-{{mat}}", "allowedMaterial": "{{mat}}", "minValue": 0, "maxValue": 100, "maxSpread": 4}
+
+> {% client.global.set("methodAId", response.body.id); %}
+
+### B2. Методика B: диапазон 50..200, допустимый разброс 5 (201)
+POST http://localhost:8080/api/analysis-methods
+Content-Type: application/json
+
+{"name": "Hemoglobin-{{mat}}", "allowedMaterial": "{{mat}}", "minValue": 50, "maxValue": 200, "maxSpread": 5}
+
+> {% client.global.set("methodBId", response.body.id); %}
+
+### B3. Список методик (200)
+GET http://localhost:8080/api/analysis-methods
+
+### B4. Методика по id (200)
+GET http://localhost:8080/api/analysis-methods/{{methodAId}}
+
+### B5. Переименовать методику (200): правила не меняются, поэтому допустимо
+PATCH http://localhost:8080/api/analysis-methods/{{methodAId}}
+Content-Type: application/json
+
+{"name": "Glucose-{{mat}}-v2"}
+
+### B6. ОШИБКА 400: минимум больше максимума
+POST http://localhost:8080/api/analysis-methods
+Content-Type: application/json
+
+{"name": "Broken-{{mat}}", "allowedMaterial": "{{mat}}", "minValue": 10, "maxValue": 5, "maxSpread": 1}
+
+### B7. Создать пробу (201): время и статус RECEIVED назначает сервер
+POST http://localhost:8080/api/samples
+Content-Type: application/json
+
+{"material": "{{mat}}", "customerId": {{userId}}}
+
+> {% client.global.set("sampleId", response.body.id); %}
+
+### B8. Список проб (200)
+GET http://localhost:8080/api/samples
+
+### B9. Проба по id (200), статус RECEIVED
+GET http://localhost:8080/api/samples/{{sampleId}}
+
+### B10. ОШИБКА 400: заказчика не существует
+POST http://localhost:8080/api/samples
+Content-Type: application/json
+
+{"material": "{{mat}}", "customerId": 999999}
+
+### B11. ОШИБКА 404: пробы не существует
+GET http://localhost:8080/api/samples/999999
+
+
+### ЧАСТЬ C. Бизнес-операция 1: назначить пробе подходящие методики
+
+
+### C1. Назначить методики (201): создаются 2 исследования (A и B), проба -> IN_PROGRESS
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+
+> {%
+    client.global.set("analysisAId", response.body[0].id);
+    client.global.set("analysisBId", response.body[1].id);
+%}
+
+### C2. Проба стала IN_PROGRESS (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+
+### C3. ОШИБКА 409: все подходящие методики уже назначены
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+
+### C4. CRUD исследований: список и по id (200)
+GET http://localhost:8080/api/analyses
+
+###
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+
+### C5. ОШИБКА 409: такая методика уже назначена этой пробе
+POST http://localhost:8080/api/analyses
+Content-Type: application/json
+
+{"sampleId": {{sampleId}}, "methodId": {{methodAId}}}
+
+
+### ЧАСТЬ D. CRUD измерений и бизнес-операция 3: подтвердить все измерения
+
+
+### D1. Измерение 10 (201), не подтверждено
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 10}
+
+> {% client.global.set("m1Id", response.body.id); %}
+
+### D2. Измерение 11 (201)
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 11}
+
+> {% client.global.set("m2Id", response.body.id); %}
+
+### D3. Измерение 20 (201): в диапазоне методики, но это выброс
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 20}
+
+> {% client.global.set("m3Id", response.body.id); %}
+
+### D4. ОШИБКА 400: значение вне диапазона методики 0..100
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 200}
+
+### D5. Среднее пока null: подтверждённых измерений нет (200)
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+
+### D6. Изменить значение измерения (200)
+PATCH http://localhost:8080/api/measurements/{{m1Id}}
+Content-Type: application/json
+
+{"value": 10.0}
+
+### D7. ОШИБКА 409: подтвердить всё нельзя, разброс 20-10=10 > 4. Не подтверждается ничего
+POST http://localhost:8080/api/analyses/{{analysisAId}}/confirm-measurements
+
+### D8. Все три измерения по-прежнему не подтверждены (200)
+GET http://localhost:8080/api/measurements
+
+### D9. Удалить выброс (204)
+DELETE http://localhost:8080/api/measurements/{{m3Id}}
+
+### D10. Подтвердить все измерения (200): среднее (10 + 11) / 2 = 10.5
+POST http://localhost:8080/api/analyses/{{analysisAId}}/confirm-measurements
+
+### D11. ОШИБКА 409: неподтверждённых измерений не осталось
+POST http://localhost:8080/api/analyses/{{analysisAId}}/confirm-measurements
+
+
+### ЧАСТЬ E. Бизнес-операции 4 и 5: завершить исследование / вернуть в работу
+
+
+### E1. ОШИБКА 409: у исследования B нет подтверждённых измерений
+POST http://localhost:8080/api/analyses/{{analysisBId}}/complete
+
+### E2. Завершить исследование A (200): COMPLETED, среднее 10.5
+POST http://localhost:8080/api/analyses/{{analysisAId}}/complete
+
+### E3. Проба всё ещё IN_PROGRESS: исследование B не завершено (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+
+### E4. ОШИБКА 409: завершённое исследование не принимает измерений
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 10}
+
+### E5. ОШИБКА 409: повторное завершение
+POST http://localhost:8080/api/analyses/{{analysisAId}}/complete
+
+### E6. Подтверждённое измерение для B (201): диапазон 50..200
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysisBId}}, "value": 100, "confirmed": true}
+
+### E7. Завершить исследование B (200)
+POST http://localhost:8080/api/analyses/{{analysisBId}}/complete
+
+### E8. Завершены все исследования -> проба COMPLETED (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+
+### E9. ОШИБКА 409: завершённую пробу отклонить нельзя
+POST http://localhost:8080/api/samples/{{sampleId}}/reject
+
+### E10. ОШИБКА 409: к завершённой пробе нельзя добавить исследование
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+
+### E11. Вернуть исследование A в работу (200): IN_PROGRESS
+POST http://localhost:8080/api/analyses/{{analysisAId}}/reopen
+
+### E12. Проба снова IN_PROGRESS (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+
+### E13. ОШИБКА 409: исследование уже в работе, возвращать нечего
+POST http://localhost:8080/api/analyses/{{analysisAId}}/reopen
+
+
+### ЧАСТЬ F. Бизнес-операция 2: отклонить пробу
+
+
+### F1. Отклонить пробу (200): REJECTED. Исследование A отменяется, завершённое B сохраняется
+POST http://localhost:8080/api/samples/{{sampleId}}/reject
+
+### F2. Исследование A -> CANCELLED (200)
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+
+### F3. Исследование B осталось COMPLETED (200)
+GET http://localhost:8080/api/analyses/{{analysisBId}}
+
+### F4. ОШИБКА 409: измерения отменённого исследования менять нельзя
+DELETE http://localhost:8080/api/measurements/{{m1Id}}
+
+### F5. ОШИБКА 409: завершённое исследование отклонённой пробы вернуть в работу нельзя
+POST http://localhost:8080/api/analyses/{{analysisBId}}/reopen
+
+### F6. ОШИБКА 409: повторное отклонение
+POST http://localhost:8080/api/samples/{{sampleId}}/reject
+
+### F7. ОШИБКА 409: отклонённой пробе исследования не назначаются
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+
+
+### ЧАСТЬ G. Удаление: целостность данных (нет висячих ссылок)
+
+
+### G1. Вторая проба того же заказчика (201)
+POST http://localhost:8080/api/samples
+Content-Type: application/json
+
+{"material": "{{mat}}", "customerId": {{userId}}}
+
+> {% client.global.set("sample2Id", response.body.id); %}
+
+### G2. Исследование по методике A через CRUD-эндпоинт (201)
+POST http://localhost:8080/api/analyses
+Content-Type: application/json
+
+{"sampleId": {{sample2Id}}, "methodId": {{methodAId}}}
+
+> {% client.global.set("analysis2Id", response.body.id); %}
+
+### G3. Измерение (201)
+POST http://localhost:8080/api/measurements
+Content-Type: application/json
+
+{"analysisId": {{analysis2Id}}, "value": 42, "confirmed": true}
+
+### G4. Удалить методику B (204): её исследование и измерения исчезают, проба остаётся
+DELETE http://localhost:8080/api/analysis-methods/{{methodBId}}
+
+### G5. ОШИБКА 404: исследование B удалено вместе с методикой
+GET http://localhost:8080/api/analyses/{{analysisBId}}
+
+### G6. Удалить исследование (204): проба {{sample2Id}} вернётся в RECEIVED
+DELETE http://localhost:8080/api/analyses/{{analysis2Id}}
+
+### G7. Проба {{sample2Id}} снова RECEIVED (200)
+GET http://localhost:8080/api/samples/{{sample2Id}}
+
+### G8. Снова назначить методики пробе 2 (201), чтобы у неё были зависимые данные для каскадного удаления
+POST http://localhost:8080/api/samples/{{sample2Id}}/order-analyses
+
+### G9. Удалить пользователя (204): удаляются все его пробы, исследования и измерения
+DELETE http://localhost:8080/api/users/{{userId}}
+
+### G10. ОШИБКА 404: пробы пользователя удалены
+GET http://localhost:8080/api/samples/{{sampleId}}
+
+###
+GET http://localhost:8080/api/samples/{{sample2Id}}
+
+### G11. ОШИБКА 404: исследования и измерения тоже удалены
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+
+###
+GET http://localhost:8080/api/measurements/{{m1Id}}
+
+### G12. Убрать методику A (204)
+DELETE http://localhost:8080/api/analysis-methods/{{methodAId}}
