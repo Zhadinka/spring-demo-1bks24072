@@ -1,0 +1,571 @@
+### CSRF и сессия для HTTP Client
+### Сначала выполните этот запрос: он создаёт/получает CSRF-токен и сохраняет JSESSIONID в cookie jar.
+### Все изменяющие запросы ниже передают X-CSRF-TOKEN, а защищённые API-запросы — HTTP Basic.
+GET http://localhost:8080/api/auth/csrf
+
+> {% client.global.set("csrfToken", response.body.token); %}
+
+### ПЕРВИЧНАЯ НАСТРОЙКА (один раз)
+### Задайте adminEmail/adminPassword/adminAuth в http-client.private.env.json.
+### Выполните этот POST, остановите коллекцию и вручную назначьте role='ADMIN' через db/06_account_management.sql.
+POST http://localhost:8080/api/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{"name": "Initial Administrator", "email": "{{adminEmail}}", "password": "{{adminPassword}}"}
+
+### После изменения роли в БД повторно выполните оставшуюся коллекцию: основная часть задания 3 работает под adminAuth.
+
+
+### Коллекция запросов: обработка лабораторных проб (IntelliJ IDEA HTTP Client)
+### Запускайте запросы сверху вниз. Идентификаторы сохраняются в переменные автоматически
+### ({{userId}}, {{sampleId}} ...), поэтому коллекция не зависит от тестовых данных в БД
+### и может выполняться повторно. Материал {{mat}} уникален для каждого прогона:
+### бизнес-операция "назначить методики" видит только методики этого сценария.
+
+
+
+### ЧАСТЬ A. CRUD: пользователи
+
+
+### A1. Создать пользователя (201). Заодно задаём уникальный материал сценария
+POST http://localhost:8080/api/users
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Maxim", "email": "maxim-{{$uuid}}@gmail.com"}
+
+> {%
+    client.global.set("userId", response.body.id);
+    client.global.set("mat", "blood-" + Date.now());
+%}
+
+### A2. Список пользователей (200)
+GET http://localhost:8080/api/users
+Authorization: Basic {{adminAuth}}
+
+### A3. Пользователь по id (200)
+GET http://localhost:8080/api/users/{{userId}}
+Authorization: Basic {{adminAuth}}
+
+### A4. Частичное обновление пользователя (200), email не меняется
+PATCH http://localhost:8080/api/users/{{userId}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Maxim Ivanov"}
+
+
+### ЧАСТЬ B. CRUD: методики, пробы
+
+
+### B1. Методика A: диапазон 0..100, допустимый разброс 4 (201)
+POST http://localhost:8080/api/analysis-methods
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Glucose-{{mat}}", "allowedMaterial": "{{mat}}", "minValue": 0, "maxValue": 100, "maxSpread": 4}
+
+> {% client.global.set("methodAId", response.body.id); %}
+
+### B2. Методика B: диапазон 50..200, допустимый разброс 5 (201)
+POST http://localhost:8080/api/analysis-methods
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Hemoglobin-{{mat}}", "allowedMaterial": "{{mat}}", "minValue": 50, "maxValue": 200, "maxSpread": 5}
+
+> {% client.global.set("methodBId", response.body.id); %}
+
+### B3. Список методик (200)
+GET http://localhost:8080/api/analysis-methods
+Authorization: Basic {{adminAuth}}
+
+### B4. Методика по id (200)
+GET http://localhost:8080/api/analysis-methods/{{methodAId}}
+Authorization: Basic {{adminAuth}}
+
+### B5. Переименовать методику (200): правила не меняются, поэтому допустимо
+PATCH http://localhost:8080/api/analysis-methods/{{methodAId}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Glucose-{{mat}}-v2"}
+
+### B6. ОШИБКА 400: минимум больше максимума
+POST http://localhost:8080/api/analysis-methods
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Broken-{{mat}}", "allowedMaterial": "{{mat}}", "minValue": 10, "maxValue": 5, "maxSpread": 1}
+
+### B7. Создать пробу (201): время и статус RECEIVED назначает сервер
+POST http://localhost:8080/api/samples
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"material": "{{mat}}", "customerId": {{userId}}}
+
+> {% client.global.set("sampleId", response.body.id); %}
+
+### B8. Список проб (200)
+GET http://localhost:8080/api/samples
+Authorization: Basic {{adminAuth}}
+
+### B9. Проба по id (200), статус RECEIVED
+GET http://localhost:8080/api/samples/{{sampleId}}
+Authorization: Basic {{adminAuth}}
+
+### B10. ОШИБКА 400: заказчика не существует
+POST http://localhost:8080/api/samples
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"material": "{{mat}}", "customerId": 999999}
+
+### B11. ОШИБКА 404: пробы не существует
+GET http://localhost:8080/api/samples/999999
+Authorization: Basic {{adminAuth}}
+
+
+### ЧАСТЬ C. Бизнес-операция 1: назначить пробе подходящие методики
+
+
+### C1. Назначить методики (201): создаются 2 исследования (A и B), проба -> IN_PROGRESS
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+> {%
+    client.global.set("analysisAId", response.body[0].id);
+    client.global.set("analysisBId", response.body[1].id);
+%}
+
+### C2. Проба стала IN_PROGRESS (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+Authorization: Basic {{adminAuth}}
+
+### C3. ОШИБКА 409: все подходящие методики уже назначены
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### C4. CRUD исследований: список и по id (200)
+GET http://localhost:8080/api/analyses
+Authorization: Basic {{adminAuth}}
+
+###
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+Authorization: Basic {{adminAuth}}
+
+### C5. ОШИБКА 409: такая методика уже назначена этой пробе
+POST http://localhost:8080/api/analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"sampleId": {{sampleId}}, "methodId": {{methodAId}}}
+
+
+### ЧАСТЬ D. CRUD измерений и бизнес-операция 3: подтвердить все измерения
+
+
+### D1. Измерение 10 (201), не подтверждено
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 10}
+
+> {% client.global.set("m1Id", response.body.id); %}
+
+### D2. Измерение 11 (201)
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 11}
+
+> {% client.global.set("m2Id", response.body.id); %}
+
+### D3. Измерение 20 (201): в диапазоне методики, но это выброс
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 20}
+
+> {% client.global.set("m3Id", response.body.id); %}
+
+### D4. ОШИБКА 400: значение вне диапазона методики 0..100
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 200}
+
+### D5. Среднее пока null: подтверждённых измерений нет (200)
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+Authorization: Basic {{adminAuth}}
+
+### D6. Изменить значение измерения (200)
+PATCH http://localhost:8080/api/measurements/{{m1Id}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"value": 10.0}
+
+### D7. ОШИБКА 409: подтвердить всё нельзя, разброс 20-10=10 > 4. Не подтверждается ничего
+POST http://localhost:8080/api/analyses/{{analysisAId}}/confirm-measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### D8. Все три измерения по-прежнему не подтверждены (200)
+GET http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+
+### D9. Удалить выброс (204)
+DELETE http://localhost:8080/api/measurements/{{m3Id}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### D10. Подтвердить все измерения (200): среднее (10 + 11) / 2 = 10.5
+POST http://localhost:8080/api/analyses/{{analysisAId}}/confirm-measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### D11. ОШИБКА 409: неподтверждённых измерений не осталось
+POST http://localhost:8080/api/analyses/{{analysisAId}}/confirm-measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+
+### ЧАСТЬ E. Бизнес-операции 4 и 5: завершить исследование / вернуть в работу
+
+
+### E1. ОШИБКА 409: у исследования B нет подтверждённых измерений
+POST http://localhost:8080/api/analyses/{{analysisBId}}/complete
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E2. Завершить исследование A (200): COMPLETED, среднее 10.5
+POST http://localhost:8080/api/analyses/{{analysisAId}}/complete
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E3. Проба всё ещё IN_PROGRESS: исследование B не завершено (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+Authorization: Basic {{adminAuth}}
+
+### E4. ОШИБКА 409: завершённое исследование не принимает измерений
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysisAId}}, "value": 10}
+
+### E5. ОШИБКА 409: повторное завершение
+POST http://localhost:8080/api/analyses/{{analysisAId}}/complete
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E6. Подтверждённое измерение для B (201): диапазон 50..200
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysisBId}}, "value": 100, "confirmed": true}
+
+### E7. Завершить исследование B (200)
+POST http://localhost:8080/api/analyses/{{analysisBId}}/complete
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E8. Завершены все исследования -> проба COMPLETED (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+Authorization: Basic {{adminAuth}}
+
+### E9. ОШИБКА 409: завершённую пробу отклонить нельзя
+POST http://localhost:8080/api/samples/{{sampleId}}/reject
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E10. ОШИБКА 409: к завершённой пробе нельзя добавить исследование
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E11. Вернуть исследование A в работу (200): IN_PROGRESS
+POST http://localhost:8080/api/analyses/{{analysisAId}}/reopen
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### E12. Проба снова IN_PROGRESS (200)
+GET http://localhost:8080/api/samples/{{sampleId}}
+Authorization: Basic {{adminAuth}}
+
+### E13. ОШИБКА 409: исследование уже в работе, возвращать нечего
+POST http://localhost:8080/api/analyses/{{analysisAId}}/reopen
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+
+### ЧАСТЬ F. Бизнес-операция 2: отклонить пробу
+
+
+### F1. Отклонить пробу (200): REJECTED. Исследование A отменяется, завершённое B сохраняется
+POST http://localhost:8080/api/samples/{{sampleId}}/reject
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### F2. Исследование A -> CANCELLED (200)
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+Authorization: Basic {{adminAuth}}
+
+### F3. Исследование B осталось COMPLETED (200)
+GET http://localhost:8080/api/analyses/{{analysisBId}}
+Authorization: Basic {{adminAuth}}
+
+### F4. ОШИБКА 409: измерения отменённого исследования менять нельзя
+DELETE http://localhost:8080/api/measurements/{{m1Id}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### F5. ОШИБКА 409: завершённое исследование отклонённой пробы вернуть в работу нельзя
+POST http://localhost:8080/api/analyses/{{analysisBId}}/reopen
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### F6. ОШИБКА 409: повторное отклонение
+POST http://localhost:8080/api/samples/{{sampleId}}/reject
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### F7. ОШИБКА 409: отклонённой пробе исследования не назначаются
+POST http://localhost:8080/api/samples/{{sampleId}}/order-analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+
+### ЧАСТЬ G. Удаление: целостность данных (нет висячих ссылок)
+
+
+### G1. Вторая проба того же заказчика (201)
+POST http://localhost:8080/api/samples
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"material": "{{mat}}", "customerId": {{userId}}}
+
+> {% client.global.set("sample2Id", response.body.id); %}
+
+### G2. Исследование по методике A через CRUD-эндпоинт (201)
+POST http://localhost:8080/api/analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"sampleId": {{sample2Id}}, "methodId": {{methodAId}}}
+
+> {% client.global.set("analysis2Id", response.body.id); %}
+
+### G3. Измерение (201)
+POST http://localhost:8080/api/measurements
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"analysisId": {{analysis2Id}}, "value": 42, "confirmed": true}
+
+### G4. Удалить методику B (204): её исследование и измерения исчезают, проба остаётся
+DELETE http://localhost:8080/api/analysis-methods/{{methodBId}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### G5. ОШИБКА 404: исследование B удалено вместе с методикой
+GET http://localhost:8080/api/analyses/{{analysisBId}}
+Authorization: Basic {{adminAuth}}
+
+### G6. Удалить исследование (204): проба {{sample2Id}} вернётся в RECEIVED
+DELETE http://localhost:8080/api/analyses/{{analysis2Id}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### G7. Проба {{sample2Id}} снова RECEIVED (200)
+GET http://localhost:8080/api/samples/{{sample2Id}}
+Authorization: Basic {{adminAuth}}
+
+### G8. Снова назначить методики пробе 2 (201), чтобы у неё были зависимые данные для каскадного удаления
+POST http://localhost:8080/api/samples/{{sample2Id}}/order-analyses
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### G9. Удалить пользователя (204): удаляются все его пробы, исследования и измерения
+DELETE http://localhost:8080/api/users/{{userId}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### G10. ОШИБКА 404: пробы пользователя удалены
+GET http://localhost:8080/api/samples/{{sampleId}}
+Authorization: Basic {{adminAuth}}
+
+### G11. ОШИБКА 404: семплы удалены
+GET http://localhost:8080/api/samples/{{sample2Id}}
+Authorization: Basic {{adminAuth}}
+
+### G12. ОШИБКА 404: анализы удалены
+GET http://localhost:8080/api/analyses/{{analysisAId}}
+Authorization: Basic {{adminAuth}}
+
+### G13. ОШИБКА 404: измерения удалены
+GET http://localhost:8080/api/measurements/{{m1Id}}
+Authorization: Basic {{adminAuth}}
+
+### G14. Убрать методику A (204)
+DELETE http://localhost:8080/api/analysis-methods/{{methodAId}}
+Authorization: Basic {{adminAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+
+### ЧАСТЬ H. ЗАДАНИЕ 4: регистрация и ограничения CUSTOMER
+### До выполнения задайте customerEmail/customerPassword/customerAuth в http-client.private.env.json.
+### customerAuth = Base64(customerEmail + ":" + customerPassword).
+
+### H0. Слабый пароль отклоняется (400)
+POST http://localhost:8080/api/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{"name": "Weak Password", "email": "weak-{{$uuid}}@gmail.com", "password": "weak"}
+
+### H1. Регистрация: роль всегда CUSTOMER, customerId создаётся сервером (201)
+POST http://localhost:8080/api/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{"name": "Demo Customer", "email": "{{customerEmail}}", "password": "{{customerPassword}}", "role": "ADMIN", "status": "LOCKED"}
+
+> {% client.global.set("registeredCustomerId", response.body.customerId); %}
+
+### H1b. Повторная регистрация с тем же e-mail (409)
+POST http://localhost:8080/api/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{"name": "Duplicate", "email": "{{customerEmail}}", "password": "AnotherStrong123!"}
+
+### H2. Профиль вошедшего пользователя (200): роль CUSTOMER
+GET http://localhost:8080/api/auth/me
+Authorization: Basic {{customerAuth}}
+
+### H2a. Профиль вошедшего пользователя (200): роль ADMIN
+GET http://localhost:8080/api/auth/me
+Authorization: Basic {{adminAuth}}
+
+### H3. Получить только собственные пробы (200; до создания пробы список может быть пустым)
+GET http://localhost:8080/api/samples
+Authorization: Basic {{customerAuth}}
+
+### H4. Создать пробу без customerId: сервер привяжет её к текущей учетной записи (201)
+POST http://localhost:8080/api/samples
+Authorization: Basic {{customerAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"material": "blood"}
+
+> {% client.global.set("customerSampleId", response.body.id); %}
+
+### H4b. Проверить, что созданная проба попала в собственный список (200)
+GET http://localhost:8080/api/samples
+Authorization: Basic {{customerAuth}}
+
+### H5. Заказать исследования собственной пробы (201): CUSTOMER разрешено
+POST http://localhost:8080/api/samples/{{customerSampleId}}/order-analyses
+Authorization: Basic {{customerAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+> {% client.global.set("customerAnalysisId", response.body[0].id); %}
+
+### H6. Попытка прочитать чужую пробу (404): идентификатор не раскрывает факт существования
+GET http://localhost:8080/api/samples/1
+Authorization: Basic {{customerAuth}}
+
+### H7. Попытка изменить справочник методик (403): CUSTOMER не имеет прав
+POST http://localhost:8080/api/analysis-methods
+Authorization: Basic {{customerAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"name": "Forbidden", "allowedMaterial": "blood", "minValue": 0, "maxValue": 1, "maxSpread": 1}
+
+### H7a. Попытка создать пробу для чужого customerId (403)
+POST http://localhost:8080/api/samples
+Authorization: Basic {{customerAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+Content-Type: application/json
+
+{"material": "blood", "customerId": 1}
+
+### H8. Попытка отклонить пробу заказчиком (403)
+POST http://localhost:8080/api/samples/{{customerSampleId}}/reject
+Authorization: Basic {{customerAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### H9. Изменяющий запрос без CSRF-токена (403): проверка CSRF отдельно от ролей
+POST http://localhost:8080/api/samples
+Authorization: Basic {{customerAuth}}
+Content-Type: application/json
+
+{"material": "blood"}
+
+
+### ЧАСТЬ I. ЗАДАНИЕ 4: LAB_TECHNICIAN
+### Выполните I1 и затем остановитесь: повысьте этот аккаунт до LAB_TECHNICIAN SQL-командой из db/06_account_management.sql.
+### После ручного изменения роли выполните I2-I4.
+### techAuth = Base64(techEmail + ":" + techPassword).
+
+### I1. Создать аккаунт сотрудника (публичная регистрация всегда создаёт CUSTOMER; 201)
+POST http://localhost:8080/api/auth/register
+Content-Type: application/json
+X-CSRF-TOKEN: {{csrfToken}}
+
+{"name": "Demo Lab Technician", "email": "{{techEmail}}", "password": "{{techPassword}}"}
+
+### I2. Войти как LAB_TECHNICIAN и просмотреть все пробы (200)
+GET http://localhost:8080/api/samples
+Authorization: Basic {{techAuth}}
+
+### I3. Выполнить бизнес-операцию отклонения пробы (200)
+POST http://localhost:8080/api/samples/{{customerSampleId}}/reject
+Authorization: Basic {{techAuth}}
+X-CSRF-TOKEN: {{csrfToken}}
+
+### I4. Попытка управлять заказчиками сотрудником (403): только ADMIN
+GET http://localhost:8080/api/users
+Authorization: Basic {{techAuth}}
+
+
+### ЧАСТЬ J. Ошибка аутентификации
+### J1. Запрос без Authorization (401, WWW-Authenticate: Basic)
+GET http://localhost:8080/api/auth/me
+
+### J2. Запрос с неверным паролем (401); для проверки укажите invalidAuth = Base64(email:wrong-password)
+GET http://localhost:8080/api/auth/me
+Authorization: Basic {{invalidAuth}}
